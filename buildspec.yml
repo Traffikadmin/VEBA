@@ -1,69 +1,34 @@
 version: 0.2
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  AWS CodeBuild – Docker build & ECR push
-#
-#  Required environment variables (set in CodePipeline / CodeBuild project):
-#    AWS_ACCOUNT_ID   – Your 12-digit AWS account ID
-#    AWS_REGION       – e.g. us-east-1
-#    ECR_REPO_NAME    – e.g. my-app
-#    ENV_NAME         – dev | staging | production
-#    CONTAINER_NAME   – Must match the container name in your task definition
-# ──────────────────────────────────────────────────────────────────────────────
-
 env:
   variables:
     DOCKER_BUILDKIT: "1"
-  # Secrets pulled from AWS Secrets Manager at build time
-  # Uncomment and add your secret ARNs as needed:
-  # secrets-manager:
-  #   DB_PASSWORD: "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-app/db-password"
 
 phases:
   pre_build:
     commands:
-      - echo "=== Pre-build: $ENV_NAME environment ==="
-      - echo "Logging in to Amazon ECR..."
-      - aws ecr get-login-password --region $AWS_REGION |
-          docker login --username AWS --password-stdin
-          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+      - echo "=== Pre-build $ENV_NAME ==="
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
       - ECR_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=$ENV_NAME-$COMMIT_HASH
       - IMAGE_URI=$ECR_URI:$IMAGE_TAG
       - LATEST_URI=$ECR_URI:$ENV_NAME-latest
-      - echo "Image will be tagged as $IMAGE_TAG"
+      - echo "Image tag $IMAGE_TAG"
 
   build:
     commands:
-      - echo "=== Build: building Docker image ==="
-      - docker build
-          --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          --build-arg VCS_REF=$CODEBUILD_RESOLVED_SOURCE_VERSION
-          --build-arg ENV_NAME=$ENV_NAME
-          --cache-from $LATEST_URI
-          -t $IMAGE_URI
-          -t $LATEST_URI
-          .
+      - echo "=== Build ==="
+      - docker build --cache-from $LATEST_URI -t $IMAGE_URI -t $LATEST_URI .
 
   post_build:
     commands:
-      - echo "=== Post-build: pushing images to ECR ==="
+      - echo "=== Post-build ==="
       - docker push $IMAGE_URI
       - docker push $LATEST_URI
-
-      # Write the imagedefinitions.json that CodePipeline's ECS deploy action reads
-      - echo "Writing imagedefinitions.json..."
-      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$IMAGE_URI"
-          > imagedefinitions.json
-
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$IMAGE_URI" > imagedefinitions.json
       - cat imagedefinitions.json
-      - echo "Build complete. Image $IMAGE_URI"
 
 artifacts:
   files:
     - imagedefinitions.json
-
-cache:
-  paths:
-    - '/root/.composer/cache/**/*'
