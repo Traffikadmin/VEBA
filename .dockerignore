@@ -1,0 +1,29 @@
+# Version control
+.git
+.gitignore
+
+# Local environment
+.env
+.env.*
+!.env.example
+node_modules/
+
+# WordPress uploads (served from S3 in production via WP Offload Media)
+wp-content/uploads/
+
+# CI/CD infra (not needed inside the image)
+cloudformation/
+scripts/
+.aws/
+buildspec.yml
+docker-compose.yml
+SETUP.md
+
+# Logs & temp
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.DS_Store

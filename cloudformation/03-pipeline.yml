@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Stack 03 – AWS CodePipeline (Source → Build → Deploy) for one environment.
+  Deploy three times with different EnvName values: dev, staging, production.
+
+  Branch mapping:
+    dev        → dev environment
+    staging    → staging environment
+    main       → production environment
+
+Parameters:
+  AppName:
+    Type: String
+    Default: veba
+
+  EnvName:
+    Type: String
+    AllowedValues: [dev, staging, production]
+
+  # GitHub source (via CodeStar Connection)
+  GitHubOwner:
+    Type: String
+    Description: GitHub organization or username.
+
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name (no owner prefix).
+
+  CodeStarConnectionArn:
+    Type: String
+    Description: >
+      ARN of an AWS CodeStar Connection to GitHub.
+      Create one in: AWS Console → CodePipeline → Settings → Connections.
+
+  # Container name must match what's in the task definition
+  ContainerName:
+    Type: String
+    Default: veba
+
+Mappings:
+  BranchMap:
+    dev:
+      Branch: dev
+    staging:
+      Branch: staging
+    production:
+      Branch: main
+
+Resources:
+
+  # ─── CodeBuild Project ───────────────────────────────────────────────────────
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${AppName}-${EnvName}-build"
+      Description: !Sub "Build Docker image for ${AppName} ${EnvName}"
+      ServiceRole:
+        Fn::ImportValue: !Sub "${AppName}-codebuild-role-arn"
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true   # Required for Docker builds
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+          - Name: ECR_REPO_NAME
+            Value: !Ref AppName
+          - Name: ENV_NAME
+            Value: !Ref EnvName
+          - Name: CONTAINER_NAME
+            Value: !Ref ContainerName
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub "/aws/codebuild/${AppName}-${EnvName}"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvName
+
+  # ─── CodePipeline ────────────────────────────────────────────────────────────
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${AppName}-${EnvName}-pipeline"
+      RoleArn:
+        Fn::ImportValue: !Sub "${AppName}-codepipeline-role-arn"
+      ArtifactStore:
+        Type: S3
+        Location:
+          Fn::ImportValue: !Sub "${AppName}-pipeline-artifacts-bucket"
+
+      Stages:
+
+        # Stage 1 – Source: pull from GitHub branch
+        - Name: Source
+          Actions:
+            - Name: GitHub
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnectionArn
+                FullRepositoryId: !Sub "${GitHubOwner}/${GitHubRepo}"
+                BranchName: !FindInMap [BranchMap, !Ref EnvName, Branch]
+                OutputArtifactFormat: CODE_ZIP
+                DetectChanges: true
+              OutputArtifacts:
+                - Name: SourceArtifact
+
+        # Stage 2 – Build: Docker build & ECR push via CodeBuild
+        - Name: Build
+          Actions:
+            - Name: BuildAndPush
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+
+        # Stage 3 – Deploy: rolling update to ECS Fargate
+        - Name: Deploy
+          Actions:
+            - Name: DeployToECS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: "1"
+              Configuration:
+                ClusterName:
+                  Fn::ImportValue: !Sub "${AppName}-${EnvName}-cluster-name"
+                ServiceName:
+                  Fn::ImportValue: !Sub "${AppName}-${EnvName}-service-name"
+                FileName: imagedefinitions.json
+              InputArtifacts:
+                - Name: BuildArtifact
+
+  # ─── CloudWatch Alarm – pipeline failures ────────────────────────────────────
+  PipelineFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AppName}-${EnvName}-pipeline-failure"
+      AlarmDescription: !Sub "CodePipeline ${EnvName} execution failed"
+      Namespace: AWS/CodePipeline
+      MetricName: FailedPipeline
+      Dimensions:
+        - Name: PipelineName
+          Value: !Sub "${AppName}-${EnvName}-pipeline"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  PipelineName:
+    Value: !Sub "${AppName}-${EnvName}-pipeline"
+    Description: CodePipeline name for this environment
+
+  CodeBuildProjectName:
+    Value: !Ref CodeBuildProject
+    Description: CodeBuild project for this environment
