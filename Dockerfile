@@ -56,6 +56,9 @@ COPY wp-config.php ./wp-config.php
 # Lightweight health check endpoint
 COPY health.php ./health.php
 
+# WordPress permalink rewrites (ephemeral container — can't rely on WP writing this)
+COPY .htaccess ./.htaccess
+
 RUN chown -R www-data:www-data /var/www/html \
     && find /var/www/html -type d -exec chmod 755 {} \; \
     && find /var/www/html -type f -exec chmod 644 {} \;
